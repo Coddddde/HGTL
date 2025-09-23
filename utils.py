@@ -532,7 +532,7 @@ def data_partition(fname, fname2, fname3):
     print("itemnum2: ", itemnum2)
     print("itemnum3: ", itemnum3)
 
-    model_path = 'pretrained/'
+    model_path = 'bert-base-uncased/'
     tokenizer = BertTokenizer.from_pretrained(model_path)
     model = BertModel.from_pretrained(model_path)
 
