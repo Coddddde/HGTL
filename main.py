@@ -67,8 +67,11 @@ def evaluate_and_log(model, dataset, args, f, domain, epoch, T):
     t_valid = t_test
     print(
         f'{domain}: epoch:{epoch}, time: {T:.6f}(s), valid (NDCG@5: {t_valid[0]:.4f}, HR@5: {t_valid[1]:.4f}), test (NDCG@5: {t_test[0]:.4f}, HR@5: {t_test[1]:.4f}), valid (NDCG@10: {t_valid[2]:.4f}, HR@10: {t_valid[3]:.4f}), test (NDCG@10: {t_test[2]:.4f}, HR@10: {t_test[3]:.4f}), valid (NDCG@20: {t_valid[4]:.4f}, HR@20: {t_valid[5]:.4f}), test (NDCG@20: {t_test[4]:.4f}, HR@20: {t_test[5]:.4f})')
-    f.write(str(t_valid) + ' ' + str(t_test) + '\n')
-    f.flush()
+    # f.write(str(t_valid) + ' ' + str(t_test) + '\n')
+    f.write(f'----------[{domain}]-[{epoch}]-[{T:.6f}s]-----------\n')
+    f.write(f'[Valid]-NDCG[@5:{t_valid[0]:.4f},@10:{t_valid[2]:.4f},@20:{t_valid[4]:.4f}]--HR[@5:{t_valid[1]:.4f},@10:{t_valid[3]:.4f},@20:{t_valid[5]:.4f}]\n')
+    f.write(f'[Test]-NDCG[@5:{t_test[0]:.4f},@10:{t_test[2]:.4f},@20:{t_test[4]:.4f}]--HR[@5:{t_test[1]:.4f},@10:{t_test[3]:.4f},@20:{t_test[5]:.4f}]\n')
+    f.flush() # 刷新缓冲区，避免数据因程序异常退出而丢失
     return time.time()
 
 

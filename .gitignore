@@ -1,1 +1,4 @@
 bert-base-uncased/
+result_default/
+log/
+nohup.out
