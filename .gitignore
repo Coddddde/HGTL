@@ -2,3 +2,8 @@ bert-base-uncased/
 result_default/
 log/
 nohup.out
+__pycache__/
+*.pyc
+*.pkl
+*.pth
+*.log
