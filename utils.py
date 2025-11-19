@@ -1,4 +1,6 @@
 import sys
+import ast
+import pdb
 import copy
 import torch
 import random
@@ -19,7 +21,23 @@ def random_neq(l, r, s):
 
 def sample_function(user_train, user_train2, user_train3, time1, time2, time3, usernum, itemnums, batch_size, maxlen,
                     result_queue, SEED, target_index):
+    """
+    kwargs:
+        user_train: dict, key: user_id, value: list of item_ids the user has interacted with in domain 1 \n
+        user_train2: dict, same as USER_TRAIN in domain 2 \n
+        user_train3: dict, same as USER_TRAIN in domain 3 \n
+        time1: dict, key: user_id, value: list of timestamps of the interactions in domain 1 \n
+        time2: dict, same as TIME in domain 2 \n
+        time3: dict, same as TIME in domain 3 \n
+        usernum: int, total number of users \n
+        itemnums: list of int, total number of items in each domain \n
+        batch_size: int, number of samples per batch \n
+        maxlen: int, maximum length of the sequence \n
+        result_queue: multiprocessing.Queue, queue to put the sampled batches \n
+        SEED: int, random seed for reproducibility \n
+    """
     def sample():
+        # 随机选择一个用户，确定目标域之后再检查该用户在目标域的交互数量是否 > 1
         user = np.random.randint(1, usernum + 1)
         if target_index == 0:
             while len(user_train[user]) <= 1:
@@ -31,6 +49,8 @@ def sample_function(user_train, user_train2, user_train3, time1, time2, time3, u
             while len(user_train3[user]) <= 1:
                 user = np.random.randint(1, usernum + 1)
 
+        # 初始化序列、正样本、负样本和时间戳的数组
+        # 0表示PAD,长度不足则前面补0
         seq = np.zeros([maxlen], dtype=np.int32)
         seq2 = np.zeros([maxlen], dtype=np.int32)
         seq3 = np.zeros([maxlen], dtype=np.int32)
@@ -60,7 +80,12 @@ def sample_function(user_train, user_train2, user_train3, time1, time2, time3, u
             main_time = time3[user][:-1]
             item_range_start = itemnums[0] + itemnums[1] + 1
             item_range_end = itemnums[0] + itemnums[1] + itemnums[2] + 1
+        
+        # 根据 target_index 确定目标域的交互记录和时间戳。
+        # item_range_start 和 item_range_end 确定物品的采样范围。
+        # nxt 是目标域的最后一个交互物品，ts 是用户的交互物品集合。
 
+        # 填充目标域的交互序列和时间戳
         idx = maxlen - 1
         for i, t in reversed(list(zip(main_seq, main_time))):
             if target_index == 0:
@@ -79,7 +104,9 @@ def sample_function(user_train, user_train2, user_train3, time1, time2, time3, u
             idx -= 1
             if idx == -1:
                 break
-
+        
+        # 填充另外域的交互序列与时间戳，并生成掩码（此时不需要再确定目标pos和neg了
+        # mask1，2用来找主序列位置对齐另外两个序列的位置，表示在时间上，主序列的第i个位置对应另外序列的第mask1[i]个位置
         if target_index == 0:
             idx = maxlen - 1
             for i, t in reversed(list(zip(user_train2[user][:-1], time2[user][:-1]))):
@@ -199,7 +226,8 @@ class WarpSampler(object):
                                                        self.result_queue,
                                                        np.random.randint(2e9),
                                                        target_index
-                                                       )))
+                                                       ))
+                )
             self.processors[-1].daemon = True
             self.processors[-1].start()
 
@@ -208,8 +236,8 @@ class WarpSampler(object):
 
     def close(self):
         for p in self.processors:
-            p.terminate()
-            p.join()
+            p.terminate() # 强制终止子进程
+            p.join() # 阻塞主进程，直到子进程完全退出
 
 
 def common_evaluate(model, dataset, args, target_index, is_valid):
@@ -369,43 +397,60 @@ def evaluate_valid3(model, dataset, args):
 
 # train/val/test data generation
 s = re.compile(r"['\"\[\]]")
-category_num = 1
+category_num = 1 # 对Category实值进行编号，0号留给NULL类别
 category2id = {'NULL': 0}
 
 
 def read_data(fname, user_ids, item_ids, User, Time, Category):
+    """
+    Read data from a CSV file and populate the user and item mappings.
+    Args:
+        fname: str, the base filename (without phase suffix) of the dataset \n
+        user_ids: list, to be populated with all user ids \n
+        item_ids: list, to be populated with all item ids \n
+        User: dict, to be populated with user-item interactions \n
+        Time: dict, to be populated with interaction timestamps \n
+        Category: dict, to be populated with item-category mappings \n
+    return:
+        user_ids: list, all user ids \n
+        item_ids: list, all item ids \n
+        User: dict, key: user_id, value: list of item_ids the user has interacted with \n
+        Time: dict, key: user_id, value: list of timestamps of the interactions \n
+        Category: dict, key: item_id, value: list of category_ids the item belongs to \n
+    """
     global category_num
-    for phase in ['train', 'valid', 'test']:
+    for phase in ['train', 'valid', 'test']: # 顺序不能变，因为再重排ID后是-2，-1再划分的
         with open(f'cross_data/processed_data_all/{fname}_{phase}.csv', 'r') as f:
             for line in f:
-                u, i, t, c = line.rstrip().split(',', 3)
+                u, i, t, c = line.rstrip().split(',', 3) # 用户ID, 物品ID, 时间戳, 物品类别
                 u = int(u)
                 i = int(i)
                 t = int(t)
-                c = re.sub(s, "", c).split(', ')
+                c = re.sub(s, "", c).split(', ')  # 等价于c = ast.literal_eval(c)
+                # c = ast.literal_eval(c)
                 user_ids.append(u)
                 item_ids.append(i)
-                User[u].append(i)
-                Time[u].append(t)
-                cid = []
+                User[u].append(i) # 记录用户的交互
+                Time[u].append(t) # 记录用户交互的时间
+                cid_list = []
                 if c[0] == '':
-                    cid.append(0)
+                    cid_list.append(0)
                 else:
-                    for cc in c[1:]:
+                    for cc in c[1:]: # 第一个cat是域名字，不重要
                         if cc not in category2id:
                             category2id[cc] = category_num
                             category_num += 1
-                        cid.append(category2id[cc])
-                Category[i] = cid
+                        cid_list.append(category2id[cc])
+                Category[i] = cid_list
     return user_ids, item_ids, User, Time, Category
 
 
 def read_negative_samples(fname, user_map, item_map, neglist):
     with open(f'cross_data/processed_data_all/{fname}_negative.csv', 'r') as f:
         for line in f:
-            l = line.rstrip().split(',')
+            l = line.rstrip().split(',') 
             u = user_map[int(l[0])]
-            for j in range(1, 101):
+            for j in range(1, 101): # 每个用户对应100个负样本
                 i = item_map[int(l[j])]
                 neglist[u].append(i)
     return neglist
@@ -414,11 +459,11 @@ def read_negative_samples(fname, user_map, item_map, neglist):
 def split_data(User, user_train, user_valid, user_test, user_neg, neglist):
     for user in User:
         nfeedback = len(User[user])
-        if nfeedback < 3:
+        if nfeedback < 3: # 对于交互少于3的用户，全放在训练集
             user_train[user] = User[user]
             user_valid[user] = []
             user_test[user] = []
-        else:
+        else: # 对于交互大于等于3的用户，按比例划分，采用留一法
             user_train[user] = User[user][:-2]
             user_valid[user] = []
             user_valid[user].append(User[user][-2])
@@ -430,27 +475,31 @@ def split_data(User, user_train, user_valid, user_test, user_neg, neglist):
 
 def data_partition(fname, fname2, fname3):
     usernum = 0
-    itemnum1 = 0
-    User = defaultdict(list)
-    User1 = defaultdict(list)
-    User2 = defaultdict(list)
-    User3 = defaultdict(list)
-    user_train1 = {}
-    user_valid1 = {}
-    user_test1 = {}
+
+    User = defaultdict(list) # 所有用户的交互记录
+    User1 = defaultdict(list) # 域A的用户交互记录
+    User2 = defaultdict(list) # 域B的用户交互记录
+    User3 = defaultdict(list) # 域C的用户交互记录
+
     neglist1 = defaultdict(list)
     neglist2 = defaultdict(list)
     neglist3 = defaultdict(list)
+
     user_neg1 = {}
     user_neg2 = {}
     user_neg3 = {}
 
-    user_map = dict()
+    user_map = dict() # 原始ID -> 统一ID的映射
     item_map = dict()
 
     user_ids = list()
+    
+    itemnum1 = 0
+    user_train1 = {}
+    user_valid1 = {}
+    user_test1 = {}
     item_ids1 = list()
-
+    
     itemnum2 = 0
     user_train2 = {}
     user_valid2 = {}
@@ -468,20 +517,18 @@ def data_partition(fname, fname2, fname3):
     Time2 = {}
     Time3 = {}
 
-    Category = dict()
-    category = {}
+    Category = dict() # key: item, 
+    category = {} # key：item_id, value: list of category_ids
 
     user_ids, item_ids1, User, Time, Category = read_data(fname, user_ids, item_ids1, User, Time, Category)
     for u in user_ids:
         if u not in user_map:
-            user_map[u] = usernum + 1
+            user_map[u] = usernum + 1 # 0不占用，从1开始编号user
             usernum += 1
     for i in item_ids1:
         if i not in item_map:
-            item_map[i] = itemnum1 + 1
+            item_map[i] = itemnum1 + 1 # 0号留给PAD，从1开始编号item
             itemnum1 += 1
-
-    neglist1 = read_negative_samples(fname, user_map, item_map, neglist1)
 
     for user in User:
         u = user_map[user]
@@ -522,9 +569,9 @@ def data_partition(fname, fname2, fname3):
             User3[u].append(i)
         Time3[u] = Time[user]
 
-    for i in Category.keys():
+    for i in Category.keys(): # 将item的类别从原始ID转换为统一ID，再用category存储
         item = item_map[i]
-        category[item] = Category[i]
+        category[item] = Category[i] # item_id -> list of category_ids
     category[0] = [0]
 
     print("category_num: ", category_num)
@@ -539,7 +586,7 @@ def data_partition(fname, fname2, fname3):
     words = []
     for key in category2id.keys():
         words.append(key)
-
+    # 将词转换为embedding
     embeddings = []
     for word in tqdm(words, desc="Processing Word Embedding", ncols=80):
         subwords = tokenizer.tokenize(word)
@@ -553,14 +600,14 @@ def data_partition(fname, fname2, fname3):
         last_hidden_state_for_word = last_hidden_state[0][-len(subwords):]
         embedding = torch.mean(last_hidden_state_for_word, dim=0).numpy()
         embeddings.append(embedding)
-
-    category_emb = torch.Tensor(embeddings)
-
+        
     data = np.array(embeddings)
-    data = data / np.linalg.norm(data, axis=1, keepdims=True)
+    category_emb = torch.Tensor(data)
+
+    data = data / np.linalg.norm(data, axis=1, keepdims=True) # 归一化，以备后续计算相似度
 
     similarity_ex = np.zeros((category_num, category_num))
-    for i in range(1, data.shape[0]):
+    for i in range(1, data.shape[0]): # 0编号是NULL，不计算
         for j in range(1, data.shape[0]):
             if i != j:
                 similarity_ex[i][j] = np.dot(data[i], data[j]) / (np.linalg.norm(data[i]) * np.linalg.norm(data[j]))
@@ -568,8 +615,8 @@ def data_partition(fname, fname2, fname3):
     category_ex = get_category_adj(category, category2id, similarity_ex)
 
     for i in category.keys():
-        if category[i][0] == 0:
-            continue
+        if category[i][0] == 0: # 0为空，NULL类别不扩展
+            continue 
         category_set = set()
         for c in category[i]:
             if c in category_ex.keys():
@@ -590,6 +637,7 @@ def data_partition(fname, fname2, fname3):
             else:
                 Item_User[item] = {user}
 
+    pdb.set_trace()
     for user, items in User2.items():
         for item in items:
             User_Item[user].add(item)
@@ -615,6 +663,7 @@ def data_partition(fname, fname2, fname3):
             else:
                 category_contain[cat] = {item}
 
+    neglist1 = read_negative_samples(fname, user_map, item_map, neglist1)
     neglist2 = read_negative_samples(fname2, user_map, item_map, neglist2)
     neglist3 = read_negative_samples(fname3, user_map, item_map, neglist3)
 
@@ -649,7 +698,7 @@ def get_category_adj(category, category2id, similarity_ex):
     for i in range(1, category_num):
         for j in range(1, category_num):
             p = M[i][j] / N[i]
-            if p >= 0.5 or similarity_ex[i][j] >= 0.75:
+            if p >= 0.5 or similarity_ex[i][j] >= 0.75: # 基于两部分，相似的概率和共现的概率
                 if i in category_ex:
                     category_ex[i].append(j)
                 else:

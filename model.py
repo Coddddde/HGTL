@@ -56,19 +56,19 @@ class HGTL(torch.nn.Module):
 
     def _init_layer_lists(self, args):
         layer_types = [
-            ('attention',),
+            ('attention',), # attention_layers, attention_layernorms
             ('cross_attention',),
             ('cross_attention3',),
-            ('forward',),
+            ('forward',), # forward_layers, forward_layernorms
             ('cross_forward',),
             ('cross_forward3',),
-            ('ca_attention',),
-            ('ca_forward',)
+            ('ca_attention',), # ca_attention_layers, ca_attention_layernorms
+            ('ca_forward',) # 
         ]
         for layer_type in layer_types:
             layernorm_list = getattr(self, f"{layer_type[0]}_layernorms", torch.nn.ModuleList())
             layer_list = getattr(self, f"{layer_type[0]}_layers", torch.nn.ModuleList())
-            for _ in range(args.num_blocks):
+            for _ in range(args.num_blocks): # num_blocks=2 (default)
                 layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
                 layernorm_list.append(layernorm)
                 if 'attention' in layer_type[0]:
@@ -104,13 +104,22 @@ class HGTL(torch.nn.Module):
             setattr(self, f"gating{i}", torch.nn.Linear(4 * args.hidden_units, args.hidden_units))
 
     def get_category_emb(self, category_emb, args):
+        """
+        category_emb: numpy array of shape (category_num, 768), got from BERT \n
+        linear_layer: mapping BERT embedding to model hidden size \n
+        @return:
+        embedding_layer: torch.nn.Embedding of shape (category_num, hidden_units)
+        """
         embedding_layer = torch.nn.Embedding(self.category_num, args.hidden_units, padding_idx=0)
-        linear_layer = torch.nn.Linear(768, args.hidden_units)
+        linear_layer = torch.nn.Linear(768, args.hidden_units) # mapping BERT embedding to model hidden size
         category_emb = linear_layer(category_emb)
         embedding_layer.weight = torch.nn.Parameter(category_emb)
         return embedding_layer
 
     def get_category_adj(self):
+        """
+        根据category字典构建C-C邻接矩阵
+        """
         A = np.zeros((self.category_num, self.category_num))
         N = np.zeros(self.category_num)
         M = np.zeros((self.category_num, self.category_num))
@@ -120,11 +129,11 @@ class HGTL(torch.nn.Module):
                 N[v] += 1
                 for j in range(idx + 1, len(values)):
                     if values[j] != 0:
-                        M[v][values[j]] += 1
+                        M[v][values[j]] += 1 # 不是简单的无向共现，而是出现v后再出现values[j]的次数
 
         for i in range(self.category_num):
             for j in range(self.category_num):
-                A[i][j] = M[i][j] / N[i]
+                A[i][j] = M[i][j] / N[i] # 统计角度计算两个cat i j出现的条件概率P(j|i)
 
         indices = []
         for i, row in enumerate(A):
@@ -139,7 +148,7 @@ class HGTL(torch.nn.Module):
         A = norm(A)
         return torch.Tensor(A)
 
-    def get_UIU_adj(self):
+    def get_UIU_adj(self): # 找邻居并不会排除自己 2跳信息
         Adj = {}
         k = self.max_neighbor_len
         for user in tqdm(range(1, self.user_num), desc="get_UIU_adj", ncols=80):
@@ -153,10 +162,10 @@ class HGTL(torch.nn.Module):
                     else:
                         user_count[neighbor_user] = 1
             sorted_users = sorted(user_count.items(), key=lambda x: x[1], reverse=True)
-            Adj[user] = [sorted_users[i][0] for i in range(min(k, len(sorted_users)))]
+            Adj[user] = [sorted_users[i][0] for i in range(min(k, len(sorted_users)))] # 选取top-k个邻居
         return Adj
 
-    def get_UICIU_adj(self):
+    def get_UICIU_adj(self): # 借助item-category-item找邻居，可能会算上自己 4跳信息
         Adj = {}
         k = self.max_neighbor_len
         for user in tqdm(range(1, self.user_num), desc="get_UICIU_adj", ncols=80):
@@ -188,7 +197,7 @@ class HGTL(torch.nn.Module):
             Adj[user] = [sorted_users[i][0] for i in range(min(k, len(sorted_users)))]
         return Adj
 
-    def get_CIC_adj(self):
+    def get_CIC_adj(self): # 可能会算上自己 2跳信息
         Adj = {}
         k = self.max_neighbor_len
         for c in tqdm(range(1, self.category_num), desc="get_CIC_adj", ncols=80):
@@ -207,7 +216,7 @@ class HGTL(torch.nn.Module):
             Adj[c] = [sorted_categories[i][0] for i in range(min(k, len(sorted_categories)))]
         return Adj
 
-    def get_CIUIC_adj(self):
+    def get_CIUIC_adj(self): # 借助item-user-item找category邻居，可能会算上自己 4跳信息
         Adj = {}
         k = self.max_neighbor_len
         for c in tqdm(range(1, self.category_num), desc="get_CIUIC_adj", ncols=80):
@@ -236,7 +245,7 @@ class HGTL(torch.nn.Module):
             Adj[c] = [sorted_categories[i][0] for i in range(min(k, len(sorted_categories)))]
         return Adj
 
-    def get_IUI_adj(self):
+    def get_IUI_adj(self): # item-user-item 找邻居，可能会算上自己 2跳信息
         Adj = {}
         k = self.max_neighbor_len
         for item in tqdm(range(1, self.item_num), desc="get_IUI_adj", ncols=80):
@@ -254,7 +263,7 @@ class HGTL(torch.nn.Module):
             Adj[item] = [sorted_items[i][0] for i in range(min(k, len(sorted_items)))]
         return Adj
 
-    def get_ICI_adj(self):
+    def get_ICI_adj(self): # item-category-item 找邻居，可能会算上自己 2跳信息
         k = self.max_neighbor_len
         item_num = self.item_num
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -338,11 +347,11 @@ class HGTL(torch.nn.Module):
             attention_mask[:, :, 0] = False
             return torch.from_numpy(attention_mask).to(self.dev)
 
-    def get_category_loss_and_features(self, log_seqs_list):
+    def get_category_loss_and_features(self, log_seqs_list): # 这部分可以在服务器上完成，即训练一个全局图
         c1 = self.get_category_metapath_embedding_CIC()
         c2 = self.get_category_metapath_embedding_CIUIC()
         con_loss2 = SSL_binary(c1, c2)
-        self.category_emb.weight = torch.nn.Parameter(c1 + c2)
+        self.category_emb.weight = torch.nn.Parameter(c1 + c2) # ???直接替换category emb会不会有问题，每次获取类别feature时都要重新计算
         category_features_list = []
         att_category_features_list = []
         for log_seqs in log_seqs_list:
@@ -439,6 +448,14 @@ class HGTL(torch.nn.Module):
         return user, con_loss1, con_loss2, con_loss3
 
     def get_user_metapath_embedding_UIU(self, user_ids):
+        """
+        Query: user embedding \n
+        Key, Value: user embedding \n
+        @parameters:
+        user_ids: [user_num, 1] \n
+        @return:
+        user_features: [user_num, hidden_units]
+        """
         users = self.user_emb(torch.LongTensor(user_ids).to(self.dev))
         users *= self.user_emb.embedding_dim ** 0.5
         users = self.emb_dropout(users)
@@ -466,6 +483,14 @@ class HGTL(torch.nn.Module):
         return user_features
 
     def get_user_metapath_embedding_UICIU(self, user_ids):
+        """
+        Query: user embedding \n
+        Key, Value: user embedding \n
+        @parameters:
+        user_ids: list of user ids [user_num, 1]\n
+        @return:
+        user_features: [user_num, hidden_units]
+        """
         users = self.user_emb(torch.LongTensor(user_ids).to(self.dev))
         users *= self.user_emb.embedding_dim ** 0.5
         users = self.emb_dropout(users)
@@ -474,7 +499,7 @@ class HGTL(torch.nn.Module):
         for u in user_ids:
             neighbor = self.UICIU_adj[u]
             while len(neighbor) < self.max_neighbor_len:
-                neighbor.append(0)
+                neighbor.append(0) # 不满足max_neighbor_len则补0
             neighbor_users.append(neighbor)
         neighbor_users = torch.LongTensor(neighbor_users)
 
@@ -493,6 +518,15 @@ class HGTL(torch.nn.Module):
         return user_features
 
     def get_category_metapath_embedding_CIC(self):
+        """
+        Query: category embedding \n
+        Key, Value: category embedding \n
+        @need:
+        1. self.category_emb \n
+        2. self.CIC_adj \n
+        @return:
+        category_features: [category_num, hidden_units]
+        """
         category_ids = list(range(0, self.category_num))
         categories = self.category_emb(torch.LongTensor(category_ids).reshape(-1, 1).to(self.dev))
         categories *= self.category_emb.embedding_dim ** 0.5
@@ -523,9 +557,18 @@ class HGTL(torch.nn.Module):
         return category_features
 
     def get_category_metapath_embedding_CIUIC(self):
+        """
+        Query: category embedding \n
+        Key, Value: category embedding \n
+        @need:
+        1. self.category_emb \n
+        2. self.CIUIC_adj \n
+        @return:
+        category_features: [category_num, hidden_units]
+        """
         category_ids = list(range(0, self.category_num))
         categories = self.category_emb(torch.LongTensor(category_ids).reshape(-1, 1).to(self.dev))
-        categories *= self.category_emb.embedding_dim ** 0.5
+        categories *= self.category_emb.embedding_dim ** 0.5 # scaling
         categories = self.emb_dropout(categories)
 
         neighbor_categories = []
@@ -552,42 +595,58 @@ class HGTL(torch.nn.Module):
         return category_features
 
     def get_item_metapath_embedding_IUI(self, log_seqs):
+        """
+        Query: item embedding \n
+        Key, Value: item embedding \n
+        @parameters:
+        log_seqs: [batch_size, seq_len] \n
+        @return:
+        item_features: [batch_size, seq_len, hidden_units]
+        """
         seqs = self.item_emb(torch.LongTensor(log_seqs).to(self.dev))
         seqs *= self.item_emb.embedding_dim ** 0.5
-        seqs = self.emb_dropout(seqs)
+        seqs = self.emb_dropout(seqs) # [batch_size, seq_len, hidden_units]
 
-        timeline_mask = torch.BoolTensor(log_seqs == 0).to(self.dev)
-        seqs *= ~timeline_mask.unsqueeze(-1)
+        timeline_mask = torch.BoolTensor(log_seqs == 0).to(self.dev) # padding位置为True
+        seqs *= ~timeline_mask.unsqueeze(-1) # 
 
         neighbor_seqs = []
         for b in log_seqs:
             neighbor_seq = []
             for j in b:
                 if j == 0:
-                    neighbor_seq.append([0] * self.max_neighbor_len)
+                    neighbor_seq.append([0] * self.max_neighbor_len) # 0号item的邻居全为0
                 else:
                     cd = self.IUI_adj[j]
                     while len(cd) < self.max_neighbor_len:
                         cd.append(0)
                     neighbor_seq.append(cd)
             neighbor_seqs.append(neighbor_seq)
-        neighbor_seqs = torch.LongTensor(neighbor_seqs)
+        neighbor_seqs = torch.LongTensor(neighbor_seqs) # [batch_size, seq_len, max_neighbor_len]
 
         Q = self.iui_attention_layernorms(seqs)
-        Q = Q.unsqueeze(2)
+        Q = Q.unsqueeze(2) # [batch_size, seq_len, 1, hidden_units]
 
-        K = self.item_emb(neighbor_seqs.to(self.dev))
-        K *= self.item_emb.embedding_dim ** 0.5
-        K = V = self.emb_dropout(K)
-        dot_products = torch.sum(Q * K, dim=-1)
-        scaled_dot_products = dot_products / 50
-        attention_weights = torch.softmax(scaled_dot_products, dim=-1)
-        output = torch.sum(attention_weights.unsqueeze(-1) * V, dim=2)
+        K = self.item_emb(neighbor_seqs.to(self.dev)) # [batch_size, seq_len, max_neighbor_len, hidden_units]
+        K *= self.item_emb.embedding_dim ** 0.5 # scaling
+        K = V = self.emb_dropout(K) # [batch_size, seq_len, max_neighbor_len, hidden_units]
+        dot_products = torch.sum(Q * K, dim=-1) # [batch_size, seq_len, max_neighbor_len] item与邻居item的点积、相加作相似度
+        scaled_dot_products = dot_products / 50    # scaling 去除维度平均值 (50为经验值)
+        attention_weights = torch.softmax(scaled_dot_products, dim=-1) # [batch_size, seq_len, max_neighbor_len] 归一化得到权重
+        output = torch.sum(attention_weights.unsqueeze(-1) * V, dim=2) # 对hidden_units加权，所以在最后一维扩充
 
         item_features = self.iui_last_layernorm(output)
         return item_features
 
     def get_item_metapath_embedding_ICI(self, log_seqs):
+        """
+        Query: item embedding \n
+        Key, Value: item embedding \n
+        @parameters:
+        log_seqs: [batch_size, seq_len] \n
+        @return:
+        item_features: [batch_size, seq_len, hidden_units]
+        """
         seqs = self.item_emb(torch.LongTensor(log_seqs).to(self.dev))
         seqs *= self.item_emb.embedding_dim ** 0.5
         seqs = self.emb_dropout(seqs)
@@ -624,6 +683,14 @@ class HGTL(torch.nn.Module):
         return item_features
 
     def get_item_category_att(self, log_seqs):
+        """
+        Query: item embedding \n
+        Key, Value: category embedding \n
+        @parameters:
+        log_seqs: [batch_size, seq_len] \n
+        @return:
+        category_features: [batch_size, seq_len, hidden_units]
+        """
         seqs = self.item_emb(torch.LongTensor(log_seqs).to(self.dev))
         seqs *= self.item_emb.embedding_dim ** 0.5
         seqs = self.emb_dropout(seqs)
@@ -635,9 +702,9 @@ class HGTL(torch.nn.Module):
         for b in log_seqs:
             ca_seq = []
             for j in b:
-                cd = self.category[j]
-                if len(cd) > self.max_category_len:
-                    cd = cd[:self.max_category_len]
+                cd = self.category[j][:self.max_category_len] # 切片访问自动处理越界问题
+                # if len(cd) > self.max_category_len:
+                #     cd = cd[:self.max_category_len]
 
                 while len(cd) < self.max_category_len:
                     cd.append(0)

@@ -93,7 +93,7 @@ if __name__ == '__main__':
                     batch_size=args.batch_size, maxlen=args.maxlen, n_workers=3, target_index=2)
     ]
     model = HGTL(usernum, itemnum1 + itemnum2 + itemnum3, category, category_emb, category_num, User_Item, Item_User,
-                 category_contain, args).to(args.device)
+                 category_contain, args).to(args.device) # 同一个推荐器推荐所有域的物品
 
     for name, param in model.named_parameters():
         try:
@@ -106,7 +106,7 @@ if __name__ == '__main__':
     if args.state_dict_path is not None:
         try:
             model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
-            tail = args.state_dict_path[args.state_dict_path.find('epoch=') + 6:]
+            tail = args.state_dict_path[args.state_dict_path.find('epoch=') + 6:] # 断点重训
             epoch_start_idx = int(tail[:tail.find('.')]) + 1
         except:
             print('failed loading state_dicts, pls check file path: ', end="")
