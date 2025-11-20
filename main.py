@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import argparse
 from tqdm import tqdm
+import datetime
 
 from model import HGTL
 from utils import *
@@ -82,7 +83,9 @@ if __name__ == '__main__':
      User_Item, Item_User, category_contain, category_num] = dataset
     num_batch = len(user_train1) // args.batch_size
 
-    f = open(os.path.join('result_' + args.train_dir, 'log.txt'), 'w')
+    log_filename = f"log_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+    f = open(os.path.join('result_' + args.train_dir, log_filename), 'w')
+    f.write(f"Log start time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
 
     samplers = [
         WarpSampler(user_train1, user_train2, user_train3, time1, time2, time3, usernum, [itemnum1, itemnum2, itemnum3],

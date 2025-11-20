@@ -3,7 +3,7 @@ import torch
 from collections import defaultdict
 import torch.nn.functional as F
 from tqdm import tqdm
-
+from utils import cache_results
 
 class PointWiseFeedForward(torch.nn.Module):
     def __init__(self, hidden_units, dropout_rate):
@@ -147,7 +147,8 @@ class HGTL(torch.nn.Module):
 
         A = norm(A)
         return torch.Tensor(A)
-
+    
+    @cache_results("cross_data/processed_data_all", "UIU_adj.pkl")
     def get_UIU_adj(self): # 找邻居并不会排除自己 2跳信息
         Adj = {}
         k = self.max_neighbor_len
@@ -165,6 +166,8 @@ class HGTL(torch.nn.Module):
             Adj[user] = [sorted_users[i][0] for i in range(min(k, len(sorted_users)))] # 选取top-k个邻居
         return Adj
 
+
+    @cache_results("cross_data/processed_data_all", "UICIU_adj.pkl")
     def get_UICIU_adj(self): # 借助item-category-item找邻居，可能会算上自己 4跳信息
         Adj = {}
         k = self.max_neighbor_len
@@ -197,6 +200,8 @@ class HGTL(torch.nn.Module):
             Adj[user] = [sorted_users[i][0] for i in range(min(k, len(sorted_users)))]
         return Adj
 
+
+    @cache_results("cross_data/processed_data_all", "CIC_adj.pkl")
     def get_CIC_adj(self): # 可能会算上自己 2跳信息
         Adj = {}
         k = self.max_neighbor_len
@@ -216,6 +221,8 @@ class HGTL(torch.nn.Module):
             Adj[c] = [sorted_categories[i][0] for i in range(min(k, len(sorted_categories)))]
         return Adj
 
+
+    @cache_results("cross_data/processed_data_all", "CIUIC_adj.pkl")
     def get_CIUIC_adj(self): # 借助item-user-item找category邻居，可能会算上自己 4跳信息
         Adj = {}
         k = self.max_neighbor_len
@@ -245,6 +252,8 @@ class HGTL(torch.nn.Module):
             Adj[c] = [sorted_categories[i][0] for i in range(min(k, len(sorted_categories)))]
         return Adj
 
+
+    @cache_results("cross_data/processed_data_all", "IUI_adj.pkl")
     def get_IUI_adj(self): # item-user-item 找邻居，可能会算上自己 2跳信息
         Adj = {}
         k = self.max_neighbor_len
@@ -263,6 +272,8 @@ class HGTL(torch.nn.Module):
             Adj[item] = [sorted_items[i][0] for i in range(min(k, len(sorted_items)))]
         return Adj
 
+
+    @cache_results("cross_data/processed_data_all", "ICI_adj.pkl")
     def get_ICI_adj(self): # item-category-item 找邻居，可能会算上自己 2跳信息
         k = self.max_neighbor_len
         item_num = self.item_num
@@ -307,7 +318,7 @@ class HGTL(torch.nn.Module):
         seqs = seqsi1 + seqsi2
         positions = np.tile(np.array(range(log_seqs.shape[1])), [log_seqs.shape[0], 1])
         seqs += self.pos_emb(torch.LongTensor(positions).to(self.dev))
-        seqs = self.emb_dropout(seqs)
+        seqs = self.emb_dropout(seqs) # [batch_size, seq_len, hidden_units]
         timeline_mask = torch.BoolTensor(log_seqs == 0).to(self.dev)
         seqs *= ~timeline_mask.unsqueeze(-1)
         return seqs, timeline_mask
@@ -335,9 +346,16 @@ class HGTL(torch.nn.Module):
         return query_seq
 
     def get_attention_mask(self, log_seqs, mask=None):
+        """
+        @parameters:\n
+        mask: None or [batch_size, seq_len] \n
+        @return:\n
+        mask not None: [batch_size, seq_len, seq_len] \n
+        mask is None: [seq_len, seq_len] \n
+        """
         if mask is None:
             tl = log_seqs.shape[1]
-            return ~torch.tril(torch.ones((tl, tl), dtype=torch.bool, device=self.dev))
+            return ~torch.tril(torch.ones((tl, tl), dtype=torch.bool, device=self.dev)) # torch.tril 返回下三角矩阵，包括对角线
         else:
             batch_size, tl = log_seqs.shape
             attention_mask = np.ones((batch_size, tl, tl), dtype=bool)
@@ -348,6 +366,10 @@ class HGTL(torch.nn.Module):
             return torch.from_numpy(attention_mask).to(self.dev)
 
     def get_category_loss_and_features(self, log_seqs_list): # 这部分可以在服务器上完成，即训练一个全局图
+        """
+        @parameters:\n
+        log_seqs_list: [domain_num, batch_size, seq_len] \n
+        """
         c1 = self.get_category_metapath_embedding_CIC()
         c2 = self.get_category_metapath_embedding_CIUIC()
         con_loss2 = SSL_binary(c1, c2)
@@ -374,6 +396,7 @@ class HGTL(torch.nn.Module):
                            forward_layers, forward_layernorms, mask=None, att_key=False):
         seqs, timeline_mask = self.get_item_embedding(log_seqs)
         attention_mask = self.get_attention_mask(log_seqs, mask)
+        # 对IUI和ICI得到的features再进行attention
         return self.apply_attention_block(seqs, seqs, attention_layers, attention_layernorms,
                                           forward_layers, forward_layernorms, attention_mask, timeline_mask, att_key)
 
@@ -728,6 +751,9 @@ class HGTL(torch.nn.Module):
         return category_features
 
     def category_attention(self, log_seqs, category_features):
+        """
+        cayegory_features: [batch_size, seq_len, hidden_units] \n
+        """
         category_features *= self.category_emb.embedding_dim ** 0.5
         category_features = self.emb_dropout(category_features)
 
@@ -736,7 +762,7 @@ class HGTL(torch.nn.Module):
 
         tl = category_features.shape[1]
         attention_mask = ~torch.tril(torch.ones((tl, tl), dtype=torch.bool, device=self.dev))
-
+        # category self-attention
         for i in range(len(self.ca_attention_layers)):
             category_features = torch.transpose(category_features, 0, 1)
             Q = self.ca_attention_layernorms[i](category_features)
@@ -804,7 +830,13 @@ def norm(adj):
     return degree.dot(adj).dot(degree)
 
 def SSL(sess_emb_hgnn, sess_emb_lgcn):
+    """
+    @parameters:
+    sess_emb_hgnn: [batch_size, seq_len, hidden_units] \n
+    sess_emb_lgcn: [batch_size, seq_len, hidden_units] \n
+    """
     def row_column_shuffle(embedding):
+        # 行列都进行打散
         corrupted_embedding = embedding[torch.randperm(embedding.size()[0])]
         corrupted_embedding = corrupted_embedding[:, torch.randperm(corrupted_embedding.size()[1])]
         return corrupted_embedding
@@ -819,12 +851,17 @@ def SSL(sess_emb_hgnn, sess_emb_lgcn):
     return con_loss
 
 def SSL_binary(sess_emb_hgnn, sess_emb_lgcn):
+    """
+    按照batch来进行对比学习，这个对比学习可以调整吧。。。。这也太简陋了
+    """
     def row_column_shuffle(embedding):
+        # 只对行进行打散
         corrupted_embedding = embedding[torch.randperm(embedding.size()[0])]
         return corrupted_embedding
 
     def score(x1, x2):
-        return torch.sum(torch.mul(x1.detach(), x2.detach()), 1)
+        # return torch.sum(torch.mul(x1.detach(), x2.detach()), 1) # 由于detach，所以梯度不会回到原始张量计算图
+        return torch.sum(torch.mul(x1, x2), 1)
 
     pos = score(sess_emb_hgnn, sess_emb_lgcn)
     neg1 = score(sess_emb_hgnn, row_column_shuffle(sess_emb_lgcn))

@@ -1,6 +1,9 @@
 import sys
 import ast
 import pdb
+import os
+import pickle
+from functools import wraps
 import copy
 import torch
 import random
@@ -11,6 +14,37 @@ import re
 from transformers import BertTokenizer, BertModel
 from tqdm import tqdm
 
+def cache_results(cache_dir, cache_file):
+    """
+    装饰器，用于缓存函数的返回结果。\n
+    如果缓存文件存在，直接读取缓存；否则执行函数并保存结果；\n
+    Args:
+        cache_dir: str, 缓存文件夹路径 \n
+        cache_file: str, 缓存文件名 \n
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # 确保缓存目录存在
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_path = os.path.join(cache_dir, cache_file)
+
+            # 如果缓存文件存在，直接读取缓存
+            if os.path.exists(cache_path):
+                with open(cache_path, 'rb') as f:
+                    result = pickle.load(f)
+                print(f"{func.__name__} is loading cached results from {cache_path}...")
+                return result
+            
+            # 否则执行函数并保存结果
+            print(f"Cache not found, executing function: {func.__name__}...")
+            result = func(*args, **kwargs)
+            with open(cache_path, 'wb') as f:
+                pickle.dump(result, f)
+            print(f"Saved results to cache at {cache_path}")
+            return result
+        return wrapper
+    return decorator
 
 def random_neq(l, r, s):
     t = np.random.randint(l, r)
@@ -578,31 +612,41 @@ def data_partition(fname, fname2, fname3):
     print("itemnum1: ", itemnum1)
     print("itemnum2: ", itemnum2)
     print("itemnum3: ", itemnum3)
+    
+    file_path = f"./cross_data/processed_data_all/category_embeddings_{fname}-{fname2}-{fname3}.npy"
+    try:
+        data = np.load(file_path)
+        assert data.shape[0] == category_num
+        assert data.shape[1] == 768
+        category_emb = torch.Tensor(data)
+        print("Category embeddings loaded from file.")
+    except FileNotFoundError:
+        print("Generating category embeddings using BERT...")
+        model_path = 'bert-base-uncased/'
+        tokenizer = BertTokenizer.from_pretrained(model_path)
+        model = BertModel.from_pretrained(model_path)
 
-    model_path = 'bert-base-uncased/'
-    tokenizer = BertTokenizer.from_pretrained(model_path)
-    model = BertModel.from_pretrained(model_path)
+        words = []
+        for key in category2id.keys():
+            words.append(key)
+        # 将词转换为embedding
+        embeddings = []
+        for word in tqdm(words, desc="Processing Word Embedding", ncols=80):
+            subwords = tokenizer.tokenize(word)
+            input_ids = tokenizer.convert_tokens_to_ids(subwords)
+            input_tensor = torch.tensor([input_ids])
 
-    words = []
-    for key in category2id.keys():
-        words.append(key)
-    # 将词转换为embedding
-    embeddings = []
-    for word in tqdm(words, desc="Processing Word Embedding", ncols=80):
-        subwords = tokenizer.tokenize(word)
-        input_ids = tokenizer.convert_tokens_to_ids(subwords)
-        input_tensor = torch.tensor([input_ids])
+            with torch.no_grad():
+                output_tensor = model(input_tensor)
 
-        with torch.no_grad():
-            output_tensor = model(input_tensor)
-
-        last_hidden_state = output_tensor.last_hidden_state
-        last_hidden_state_for_word = last_hidden_state[0][-len(subwords):]
-        embedding = torch.mean(last_hidden_state_for_word, dim=0).numpy()
-        embeddings.append(embedding)
-        
-    data = np.array(embeddings)
-    category_emb = torch.Tensor(data)
+            last_hidden_state = output_tensor.last_hidden_state
+            last_hidden_state_for_word = last_hidden_state[0][-len(subwords):]
+            embedding = torch.mean(last_hidden_state_for_word, dim=0).numpy()
+            embeddings.append(embedding)
+            
+        data = np.array(embeddings)
+        np.save(f"./cross_data/processed_data_all/category_embeddings_{fname}-{fname2}-{fname3}.npy", data)
+        category_emb = torch.Tensor(data)
 
     data = data / np.linalg.norm(data, axis=1, keepdims=True) # 归一化，以备后续计算相似度
 
@@ -637,7 +681,7 @@ def data_partition(fname, fname2, fname3):
             else:
                 Item_User[item] = {user}
 
-    pdb.set_trace()
+    # pdb.set_trace()
     for user, items in User2.items():
         for item in items:
             User_Item[user].add(item)
@@ -704,3 +748,5 @@ def get_category_adj(category, category2id, similarity_ex):
                 else:
                     category_ex[i] = [j]
     return category_ex
+
+
